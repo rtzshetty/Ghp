@@ -6,17 +6,13 @@ app.use(express.json());
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY || "ed9311c3613b06f414be99abaec5dd86";
 
-// Robust TMDB Search (Works 100% reliably on Vercel, Netlify, and Preview)
 const searchTmdb = async (query: string) => {
   try {
     const { data } = await axios.get(`https://api.themoviedb.org/3/search/multi`, {
-      params: {
-        api_key: TMDB_API_KEY,
-        query: query
-      },
+      params: { api_key: TMDB_API_KEY, query },
       timeout: 5000
     });
-    const results = (data.results || [])
+    return (data.results || [])
       .filter((item: any) => item.media_type === 'tv' || item.media_type === 'movie')
       .map((item: any) => ({
         title: item.name || item.title || 'Untitled',
@@ -25,16 +21,31 @@ const searchTmdb = async (query: string) => {
         type: item.media_type === 'movie' ? 'movie' : 'series',
         source: 'TMDB'
       }));
-    return results;
-  } catch (err) {
+  } catch {
     return [];
   }
+};
+
+// Helper to get YouTube trailer embed from TMDB
+const getYoutubeTrailer = async (mediaType: string, id: string) => {
+  try {
+    const typePath = mediaType === 'movie' ? 'movie' : 'tv';
+    const { data } = await axios.get(`https://api.themoviedb.org/3/${typePath}/${id}/videos`, {
+      params: { api_key: TMDB_API_KEY },
+      timeout: 4000
+    });
+    const trailer = (data.results || []).find((v: any) => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser'));
+    if (trailer && trailer.key) {
+      return `https://www.youtube-nocookie.com/embed/${trailer.key}?autoplay=1&rel=0`;
+    }
+  } catch {}
+  // Default fallback video (Big Buck Bunny trailer or similar reliable video)
+  return 'https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ?autoplay=1';
 };
 
 app.get('/api/search', async (req, res) => {
   const query = req.query.q as string;
   if (!query) return res.status(400).json({ error: "Query parameter 'q' is required" });
-
   const results = await searchTmdb(query);
   res.json({ results });
 });
@@ -44,16 +55,14 @@ app.get('/api/episodes', async (req, res) => {
   if (!url) return res.status(400).json({ error: "URL is required" });
 
   try {
-    // Parse TMDB pseudo-link or clean title fallback
     let mediaType = 'tv';
-    let id = '550'; // default fallback
+    let id = '550';
 
     if (typeof url === 'string' && url.startsWith('tmdb://')) {
       const parts = url.replace('tmdb://', '').split('/');
       mediaType = parts[0];
       id = parts[1];
     } else {
-      // If a slug was passed, search TMDB by title
       const cleanTitle = (url as string).split('/').pop()?.replace(/-/g, ' ') || 'anime';
       const searchRes = await searchTmdb(cleanTitle);
       if (searchRes[0]) {
@@ -71,7 +80,6 @@ app.get('/api/episodes', async (req, res) => {
       return;
     }
 
-    // Fetch TV show seasons and episodes from TMDB
     const showRes = await axios.get(`https://api.themoviedb.org/3/tv/${id}`, {
       params: { api_key: TMDB_API_KEY }
     });
@@ -105,33 +113,32 @@ app.get('/api/streams', async (req, res) => {
   try {
     let type = 'movie';
     let movieId = '550';
-    let tvId = '';
+    let tvId = '550';
     let season = '1';
     let episode = '1';
 
     if (typeof url === 'string' && url.startsWith('tmdb://')) {
       const parts = url.replace('tmdb://', '').split('/');
-      type = parts[0]; // 'movie' or 'episode'
+      type = parts[0];
       if (type === 'movie') {
         movieId = parts[1];
       } else if (type === 'episode') {
         tvId = parts[1];
         season = parts[2];
         episode = parts[3];
-      }
-    } else {
-      // Fallback search
-      const searchRes = await searchTmdb('anime');
-      if (searchRes[0]) {
-        movieId = searchRes[0].link.split('/')[2];
+        type = 'tv';
       }
     }
+
+    const targetId = type === 'movie' ? movieId : tvId;
+    const youtubeEmbed = await getYoutubeTrailer(type, targetId);
 
     if (type === 'movie') {
       res.json({
         title: "Movie Stream",
         streams: [
-          { server: "VidSrc (HD)", link: `https://vidsrc.cc/v2/embed/movie/${movieId}` },
+          { server: "HD Trailer (Official)", link: youtubeEmbed },
+          { server: "VidSrc Player", link: `https://vidsrc.xyz/embed/movie?tmdb=${movieId}` },
           { server: "MultiEmbed", link: `https://multiembed.mov/?video_id=${movieId}&tmdb=1` },
           { server: "EmbedSu", link: `https://embed.su/embed/movie/${movieId}` }
         ]
@@ -140,7 +147,8 @@ app.get('/api/streams', async (req, res) => {
       res.json({
         title: `Episode ${episode}`,
         streams: [
-          { server: "VidSrc (HD)", link: `https://vidsrc.cc/v2/embed/tv/${tvId}/${season}/${episode}` },
+          { server: "HD Trailer (Official)", link: youtubeEmbed },
+          { server: "VidSrc Player", link: `https://vidsrc.xyz/embed/tv?tmdb=${tvId}&season=${season}&episode=${episode}` },
           { server: "MultiEmbed", link: `https://multiembed.mov/?video_id=${tvId}&tmdb=1&s=${season}&e=${episode}` },
           { server: "EmbedSu", link: `https://embed.su/embed/tv/${tvId}/${season}/${episode}` }
         ]
@@ -150,8 +158,8 @@ app.get('/api/streams', async (req, res) => {
     res.json({
       title: "Stream",
       streams: [
-        { server: "VidSrc (HD)", link: "https://vidsrc.cc/v2/embed/movie/550" },
-        { server: "MultiEmbed", link: "https://multiembed.mov/?video_id=550&tmdb=1" }
+        { server: "HD Stream", link: "https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ?autoplay=1" },
+        { server: "VidSrc Player", link: "https://vidsrc.xyz/embed/movie?tmdb=550" }
       ]
     });
   }
