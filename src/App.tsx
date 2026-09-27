@@ -237,9 +237,9 @@ export default function App() {
                     {currentStream ? (
                       <iframe
                         src={currentStream.link}
-                        className="w-full h-full"
+                        className="w-full h-full border-0"
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                         allowFullScreen
-                        referrerPolicy="no-referrer"
                       />
                     ) : (
                       <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-8">
