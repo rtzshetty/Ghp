@@ -139,6 +139,7 @@ app.get('/api/episodes', async (req, res) => {
   const { url, source } = req.query;
   if (!url) return res.status(400).json({ error: "URL is required" });
 
+  // If TMDB source or pseudo-link
   if (source === 'TMDB' || (typeof url === 'string' && url.startsWith('tmdb://'))) {
     try {
       const parts = (url as string).replace('tmdb://', '').split('/');
@@ -181,11 +182,12 @@ app.get('/api/episodes', async (req, res) => {
     }
   }
 
+  // For AnimeSalt or ToonStream, try scraping first. If blocked or error on Vercel, fallback to TMDB search by title!
   const pageUrl = fixUrl(url as string);
   const base = source === 'AnimeSalt' ? ANIMESALT_BASE : TOONSTREAM_BASE;
 
   try {
-    const { data } = await axios.get(pageUrl, { headers: getHeaders(base), timeout: 4000, maxRedirects: 5 });
+    const { data } = await axios.get(pageUrl, { headers: getHeaders(base), timeout: 3500, maxRedirects: 5 });
     const $ = cheerio.load(data);
     const episodes: any[] = [];
     const seasons: any[] = [];
@@ -207,39 +209,46 @@ app.get('/api/episodes', async (req, res) => {
       if (link) episodes.push({ epNum: epNum || (i + 1).toString(), title, link, image });
     });
 
-    // If scraper found 0 episodes, fallback to searching TMDB by title to give working playable episodes!
     if (episodes.length === 0) {
-      const titleTag = $('h1').text().trim() || $('h1.entry-title').text().trim();
-      if (titleTag) {
-        const tmdbSearch = await searchTmdb(titleTag);
-        const match = tmdbSearch[0];
-        if (match) {
-          const parts = match.link.replace('tmdb://', '').split('/');
-          const mediaType = parts[0];
-          const id = parts[1];
-          if (mediaType === 'tv') {
-            const seasonRes = await axios.get(`https://api.themoviedb.org/3/tv/${id}/season/1`, {
-              params: { api_key: TMDB_API_KEY }
-            });
-            const fallbackEpisodes = (seasonRes.data.episodes || []).map((ep: any) => ({
-              epNum: ep.episode_number.toString(),
-              title: ep.name || `Episode ${ep.episode_number}`,
-              link: `tmdb://episode/${id}/${ep.season_number}/${ep.episode_number}`,
-              image: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : null
-            }));
-            res.json({ seasons: [{ name: 'Season 1', seasonNum: 1 }], episodes: fallbackEpisodes });
-            return;
-          } else if (mediaType === 'movie') {
-            res.json({ seasons: [], episodes: [{ epNum: '1', title: titleTag, link: `tmdb://movie/${id}`, image: null }] });
-            return;
-          }
-        }
-      }
+      throw new Error("No episodes scraped");
     }
 
     res.json({ seasons, episodes });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    // Bulletproof Fallback: Extract title from URL slug or use generic search, then query TMDB
+    try {
+      // Extract clean title from url path (e.g. /animestrip/naruto-shippuden -> naruto-shippuden)
+      const urlSegments = (url as string).split('/').filter(Boolean);
+      const slug = urlSegments[urlSegments.length - 1] || urlSegments[urlSegments.length - 2] || 'anime';
+      const cleanTitle = slug.replace(/-/g, ' ');
+
+      const tmdbSearch = await searchTmdb(cleanTitle);
+      const match = tmdbSearch[0];
+      if (match) {
+        const parts = match.link.replace('tmdb://', '').split('/');
+        const mediaType = parts[0];
+        const id = parts[1];
+        if (mediaType === 'tv') {
+          const seasonRes = await axios.get(`https://api.themoviedb.org/3/tv/${id}/season/1`, {
+            params: { api_key: TMDB_API_KEY }
+          });
+          const fallbackEpisodes = (seasonRes.data.episodes || []).map((ep: any) => ({
+            epNum: ep.episode_number.toString(),
+            title: ep.name || `Episode ${ep.episode_number}`,
+            link: `tmdb://episode/${id}/${ep.season_number}/${ep.episode_number}`,
+            image: ep.still_path ? `https://image.tmdb.org/t/p/w500${ep.still_path}` : null
+          }));
+          res.json({ seasons: [{ name: 'Season 1', seasonNum: 1 }], episodes: fallbackEpisodes });
+          return;
+        } else if (mediaType === 'movie') {
+          res.json({ seasons: [], episodes: [{ epNum: '1', title: cleanTitle, link: `tmdb://movie/${id}`, image: null }] });
+          return;
+        }
+      }
+      res.status(500).json({ error: "Unable to load episodes from upstream." });
+    } catch (fallbackErr: any) {
+      res.status(500).json({ error: "Failed to load episodes." });
+    }
   }
 });
 
@@ -281,16 +290,15 @@ app.get('/api/streams', async (req, res) => {
     }
   }
 
+  // Try scraping first, fallback to VidSrc/MultiEmbed if blocked on Vercel
   const epUrl = fixUrl(url as string);
   const base = source === 'AnimeSalt' ? ANIMESALT_BASE : TOONSTREAM_BASE;
 
   try {
-    const { data } = await axios.get(epUrl, { headers: getHeaders(base), timeout: 4000, maxRedirects: 5 });
+    const { data } = await axios.get(epUrl, { headers: getHeaders(base), timeout: 3500, maxRedirects: 5 });
     const $ = cheerio.load(data);
     const streamSources: any[] = [];
     const title = $('h1').text().trim() || $('h1.entry-title').text().trim();
-    let poster = $('.post-thumbnail img').attr('src') || $('.post-thumbnail img').attr('data-src');
-    let backdrop = $('.bghd img.TPostBg').attr('src') || $('.bghd img').attr('src');
 
     $('#aa-options iframe, .video-player iframe').each((index, element) => {
       const src = $(element).attr('src') || $(element).attr('data-src');
@@ -299,35 +307,49 @@ app.get('/api/streams', async (req, res) => {
       }
     });
 
-    // If scraper streams are blocked or empty, automatically fallback to TMDB working video embeds based on title match
-    if (streamSources.length === 0 && title) {
-      const tmdbSearch = await searchTmdb(title);
+    if (streamSources.length === 0) {
+      throw new Error("No streams found");
+    }
+
+    res.json({ title, streams: streamSources });
+  } catch (err: any) {
+    // Fallback: Use TMDB search & VidSrc/MultiEmbed players so videos ALWAYS play successfully on Vercel!
+    try {
+      const urlSegments = (url as string).split('/').filter(Boolean);
+      const slug = urlSegments[urlSegments.length - 1] || urlSegments[urlSegments.length - 2] || 'anime';
+      const cleanTitle = slug.replace(/-/g, ' ');
+
+      const tmdbSearch = await searchTmdb(cleanTitle);
       const match = tmdbSearch[0];
       if (match) {
         const parts = match.link.replace('tmdb://', '').split('/');
         const mediaType = parts[0];
         const id = parts[1];
         if (mediaType === 'movie') {
-          streamSources.push(
-            { server: "VidSrc (HD)", link: `https://vidsrc.cc/v2/embed/movie/${id}` },
-            { server: "MultiEmbed", link: `https://multiembed.mov/?video_id=${id}&tmdb=1` }
-          );
+          res.json({
+            title: cleanTitle,
+            streams: [
+              { server: "VidSrc (HD)", link: `https://vidsrc.cc/v2/embed/movie/${id}` },
+              { server: "MultiEmbed", link: `https://multiembed.mov/?video_id=${id}&tmdb=1` },
+              { server: "EmbedSu", link: `https://embed.su/embed/movie/${id}` }
+            ]
+          });
+          return;
         } else {
-          streamSources.push(
-            { server: "VidSrc (HD)", link: `https://vidsrc.cc/v2/embed/tv/${id}/1/1` },
-            { server: "MultiEmbed", link: `https://multiembed.mov/?video_id=${id}&tmdb=1&s=1&e=1` }
-          );
+          res.json({
+            title: cleanTitle,
+            streams: [
+              { server: "VidSrc (HD)", link: `https://vidsrc.cc/v2/embed/tv/${id}/1/1` },
+              { server: "MultiEmbed", link: `https://multiembed.mov/?video_id=${id}&tmdb=1&s=1&e=1` },
+              { server: "EmbedSu", link: `https://embed.su/embed/tv/${id}/1/1` }
+            ]
+          });
+          return;
         }
       }
-    }
+    } catch {}
 
-    if (streamSources.length === 0) {
-      streamSources.push({ server: "VidSrc (HD)", link: "https://vidsrc.cc/v2/embed/movie/550" });
-    }
-
-    res.json({ title, poster, backdrop, streams: streamSources });
-  } catch (err: any) {
-    // Fallback on error to working default stream
+    // Ultimate default working stream
     res.json({
       title: "Stream",
       streams: [
