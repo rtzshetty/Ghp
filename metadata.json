@@ -1,0 +1,6 @@
+{
+  "name": "SaltStream: Anime & Toon Explorer",
+  "description": "A high-fidelity anime streaming and discovery platform powered by advanced scraping engines and TMDB metadata.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
